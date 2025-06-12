@@ -1,0 +1,35 @@
+name: Build Windows EXE
+
+on: 
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install nuitka pandas matplotlib scikit-learn seaborn pillow scipy numpy
+        
+    - name: Build EXE with Nuitka
+      run: |
+        nuitka --onefile --follow-imports --enable-plugin=tk-inter --include-package=matplotlib --include-package=pandas --include-package=scipy --include-package=sklearn --include-package=seaborn --include-package=PIL --windows-disable-console test2805-10.py
+        
+    - name: Upload EXE
+      uses: actions/upload-artifact@v4
+      with:
+        name: analyseur-spectres-exe
+        path: test2805-10.exe
+        retention-days: 30
