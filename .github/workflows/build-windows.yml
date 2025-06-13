@@ -25,7 +25,7 @@ jobs:
         
     - name: Build EXE with Nuitka
       run: |
-        nuitka --onefile --follow-imports --enable-plugin=tk-inter --include-package=matplotlib --include-package=pandas --include-package=scipy --include-package=sklearn --include-package=seaborn --include-package=PIL --windows-disable-console test2805-10.py
+        nuitka --onefile --follow-imports --enable-plugin=tk-inter --include-package=matplotlib --include-package=pandas --include-package=scipy --include-package=sklearn --include-package=seaborn --include-package=PIL --windows-console-mode=disable --assume-yes-for-downloads test2805-10.py
         
     - name: Upload EXE
       uses: actions/upload-artifact@v4
