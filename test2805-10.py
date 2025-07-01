@@ -27,7 +27,6 @@ GLOBAL_FIRST_REVERSE_COMP = None
 GLOBAL_FIRST_ALPHA_COMP_2 = None
 GLOBAL_FIRST_REVERSE_COMP_2 = None
 
-import tkinter as tk
 from PIL import ImageTk, ImageOps
 
 def optimize_lasso(
@@ -106,6 +105,24 @@ def optimize_lasso(
     df_rms.to_csv(os.path.join(directory_path, f"RMS_{suffix}.csv"), index=False)
 
     return coeffs_opt, reconstructed, errors, error_spectrum
+
+import numpy as np
+from scipy.spatial.distance import pdist, squareform
+from scipy.cluster.hierarchy import fcluster, linkage
+
+def cluster_and_average_curves(H, threshold=0.1, method='cosine'):
+    dists = pdist(H, metric=method)
+    Z = linkage(dists, method='average')
+    clusters = fcluster(Z, t=threshold, criterion='distance')
+    n_families = np.unique(clusters).size
+
+    family_means = []
+    for label in np.unique(clusters):
+        members = H[clusters == label]
+        mean_curve = members.mean(axis=0)
+        family_means.append(mean_curve)
+    family_means = np.array(family_means)
+    return clusters, family_means
 
 def display_images_and_select_refinement(parent, images_for_ref, current_ids, title="Sélection", labels=None):
     if labels is None:
@@ -460,6 +477,9 @@ class MainApp(tk.Tk):
         self.first_nmf_images = []
         self.first_nmf_labels = []
         self.selected_indices_nmf1 = []
+        self.second_nmf_history = []
+        self._nmf2_history_index = 0
+        self.show_lasso2_optimized = False
 
         self.reconstruct_dict = {}
         self.reconstructed_X = None
@@ -665,6 +685,75 @@ class MainApp(tk.Tk):
             self.display_nmf2_components()   
             self.log(f"{n_import} courbe(s) CSV importée(s).")
 
+    def display_family_means_nmf1(self):
+        if self.selected_indices_nmf1:
+            comps = [self.first_nmf_components[i] for i in self.selected_indices_nmf1]
+        else:
+            comps = self.first_nmf_components
+
+        H = np.array(comps)
+        clusters, family_means = cluster_and_average_curves(H, threshold=0.001, method='cosine')
+    
+        fig = plt.figure(figsize=(6, 4))
+        ax = fig.add_subplot(111)
+        for i, curve in enumerate(family_means):
+            ax.plot(self.all_common_q, curve, label=f'Famille {i+1}')
+        ax.set_title("Moyennes par famille de composantes (NMF1)")
+        ax.set_xlabel("q")
+        ax.set_ylabel("Intensité")
+        ax.legend(fontsize=8)
+
+        popup = tk.Toplevel(self)
+        popup.title("Family Means (NMF1)")
+        canvas = FigureCanvasTkAgg(fig, master=popup)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill='both', expand=True)
+        self.add_family_means_to_nmf1()
+    
+    def generate_image(self, curve, q_grid, color='red'):
+        fig = plt.Figure(figsize=(4, 3))
+        ax = fig.add_subplot(111)
+        ax.plot(q_grid, curve, color=color, linewidth=2)
+        ax.set_title("Family Mean" if color == 'red' else "Component")
+        buf = BytesIO()
+        fig.savefig(buf, format='png')
+        plt.close(fig)
+        buf.seek(0)
+        im = Image.open(buf)
+        return im
+
+
+    def add_family_means_to_nmf1(self, threshold=0.001):
+        if hasattr(self, "family_mean_indices_nmf1") and self.family_mean_indices_nmf1:
+            return
+        clusters, family_means = cluster_and_average_curves(
+            np.array(self.first_nmf_components), threshold=threshold, method='cosine'
+        )
+        self.family_mean_indices_nmf1 = []
+        start_idx = len(self.first_nmf_components)
+        for i, fam_mean in enumerate(family_means):
+            self.first_nmf_components.append(fam_mean)
+            self.first_nmf_images.append(self.generate_image(fam_mean, self.all_common_q, color='red'))
+            self.first_nmf_labels.append(f"[FAMILY MEAN #{i+1}]")
+            self.family_mean_indices_nmf1.append(start_idx + i)
+        self.display_nmf1_components()
+
+    def add_family_means_to_nmf2(self, threshold=0.001):
+
+        if hasattr(self, "family_mean_indices_nmf2") and self.family_mean_indices_nmf2:
+            return
+        clusters, family_means = cluster_and_average_curves(
+            np.array(self.second_nmf_components), threshold=threshold, method='cosine'
+        )
+        self.family_mean_indices_nmf2 = []
+        start_idx = len(self.second_nmf_components)
+        for i, fam_mean in enumerate(family_means):
+            self.second_nmf_components.append(fam_mean)
+            self.second_nmf_images.append(self.generate_image(fam_mean, self.all_common_q, color='red'))
+            self.second_nmf_labels.append(f"[FAMILY MEAN #{i+1}]")
+            self.family_mean_indices_nmf2.append(start_idx + i)
+        self.display_nmf2_components()
+
     def populate_tab_analysis(self):
         paned = ttk.Panedwindow(self.tab_analysis, orient='horizontal')
         paned.pack(fill='both', expand=True, pady=10, padx=10)
@@ -684,6 +773,12 @@ class MainApp(tk.Tk):
             command=self.transfer_to_nmf2
         )
         transfer_btn.pack(anchor='n', pady=(0, 5))
+        family_btn = ttk.Button(
+            self.frame_nmf1,
+            text="Afficher Family Means",
+            command=self.display_family_means_nmf1
+        )
+        family_btn.pack(pady=10)
 
         self.progress = ttk.Progressbar(self.tab_analysis, orient='horizontal', mode='determinate')
         self.progress.pack(fill='x', padx=10, pady=(0,5))
@@ -830,6 +925,17 @@ class MainApp(tk.Tk):
                     arr_ = interpolate_data(all_common_q, data_dict_all[nm])
                     arr_smooth = apply_gaussian_smoothing(arr_, sigma=10)
                     X_list.append(arr_smooth)
+
+                if not hasattr(self, 'raw_data_all'):
+                    self.raw_data_all = []
+                    self.raw_data_q = []
+                self.raw_data_all.clear()
+                self.raw_data_q.clear()
+                for nm in sample_names:
+                    df = data_dict_all[nm]
+                    self.raw_data_q.append(df['q'].values.copy())
+                    self.raw_data_all.append(df['I(q)'].values.copy())
+
                 X = np.ascontiguousarray(X_list)
 
                 base_dir = os.path.join(self.loaded_dir, "First_NMF")
@@ -1100,6 +1206,10 @@ class MainApp(tk.Tk):
             )
             df_rms = pd.DataFrame({'q': all_common_q, 'RMSE': error_spectrum})
             df_rms.to_csv(os.path.join(self.loaded_dir, 'RMS_reconstructed.csv'), index=False)
+    
+    def optimize_lasso2(self):
+        self.show_lasso2_optimized = True
+        self.update_lasso2_tab()
 
     def transfer_to_nmf2(self):
         if not self.first_nmf_components:
@@ -1148,12 +1258,27 @@ class MainApp(tk.Tk):
 
         self.refine_button = ttk.Button(param_frame2, text="Raffiner Courbes", command=self.ask_and_refine)
         self.refine_button.grid(row=0, column=2, sticky='w', padx=(0,10))
+
         self.add_rms_button = ttk.Button(param_frame2, text="Ajouter RMS", command=self.add_rms_second)
         self.add_rms_button.grid(row=0, column=3, sticky='w', padx=(0,10))
+
         self.refine0_button = ttk.Button(param_frame2, text="Affiner 0%", command=self.ask_and_refine_zero)
         self.refine0_button.grid(row=1, column=1, sticky='w', padx=(0,10))
+
         self.reset_button = ttk.Button(param_frame2, text="Annuler Raffinement", command=self.reset_second)
         self.reset_button.grid(row=1, column=2, sticky='w', padx=(0,10))
+
+        self.family2_btn = ttk.Button(param_frame2, text="Afficher/Ajouter Family Means", command=self.add_family_means_to_nmf2)
+        self.family2_btn.grid(row=1, column=3, sticky='w', padx=(0,10))
+
+        self.optimize_lasso2_btn = ttk.Button(param_frame2, text="Optimiser Lasso", command=self.optimize_lasso2)
+        self.optimize_lasso2_btn.grid(row=1, column=4, sticky='w', padx=(0,10))
+
+        self.btn_show_only_family_eans = ttk.Button(param_frame2, text="Afficher seulement Family Means", command=self.show_only_family_means_nmf2)
+        self.btn_show_only_family_eans.grid(row=2, column=1, sticky='w', padx=(0,10))
+
+        self.btn_restore_nmf2=ttk.Button(param_frame2, text="Restaurer Composantes", command=self.restore_all_nmf2_components)
+        self.btn_restore_nmf2.grid(row=2, column=2, sticky='w', padx=(0,10))
 
         container2_left = ttk.Frame(frame_nmf2_left)
         container2_left.pack(fill='both', expand=True, padx=5, pady=5)
@@ -1181,16 +1306,15 @@ class MainApp(tk.Tk):
         stats_frame = ttk.Frame(frame_nmf2_right, padding=(5, 5))
         stats_frame.pack(fill='x', padx=5, pady=(0,10))
 
-        # Ligne 1 : Moyenne RMS
         ttk.Label(stats_frame, text="Moyenne RMS :").grid(row=0, column=0, sticky='w', padx=(0,10))
         ttk.Label(stats_frame, textvariable=self.avg_rms_var).grid(row=0, column=1, sticky='w')
-        # Ligne 2 : Erreur Lasso Initiale
+
         ttk.Label(stats_frame, text="Erreur Lasso Initiale :").grid(row=1, column=0, sticky='w', padx=(0,10))
         ttk.Label(stats_frame, textvariable=self.initial_lasso_error_var).grid(row=1, column=1, sticky='w')
-        # Ligne 3 : Erreur Lasso après optimisation
+
         ttk.Label(stats_frame, text="Erreur Lasso après optimisation :").grid(row=2, column=0, sticky='w', padx=(0,10))
         ttk.Label(stats_frame, textvariable=self.optimized_lasso_error_var).grid(row=2, column=1, sticky='w')
-        # Ligne 4 : Erreur totale
+
         ttk.Label(stats_frame, text="Erreur totale :").grid(row=3, column=0, sticky='w', padx=(0,10))
         ttk.Label(stats_frame, textvariable=self.total_error_var).grid(row=3, column=1, sticky='w')
 
@@ -1216,6 +1340,47 @@ class MainApp(tk.Tk):
 
         self.progress2 = ttk.Progressbar(self.tab_nmf2, orient='horizontal', mode='determinate')
         self.progress2.pack(fill='x', padx=10, pady=(0,5))
+
+    def show_only_family_means_nmf2(self):
+        if not hasattr(self, "family_mean_indices_nmf2") or not self.family_mean_indices_nmf2:
+            self.log("Aucune family mean détectée. Cliquez d'abord sur 'Afficher/Ajouter Family Means'.")
+            return
+
+        if not hasattr(self, "_backup_second_nmf_components"):
+            self._backup_second_nmf_components = (self.second_nmf_components[:],
+                                              self.second_nmf_images[:],
+                                              self.second_nmf_labels[:])
+
+        indices = self.family_mean_indices_nmf2
+        self.second_nmf_components = [self.second_nmf_components[i] for i in indices]
+        self.second_nmf_images     = [self.second_nmf_images[i] for i in indices]
+        self.second_nmf_labels     = [self.second_nmf_labels[i] for i in indices]
+        self.display_nmf2_components()
+        self.update_lasso2_tab()
+        self.log("Affichage limité aux family means pour la seconde NMF.")
+
+    def restore_all_nmf2_components(self):
+        if hasattr(self, "_backup_second_nmf_components"):
+            self.second_nmf_components, self.second_nmf_images, self.second_nmf_labels = [
+                l[:] for l in self._backup_second_nmf_components
+            ]
+        self.selected_indices_nmf2 = []
+        self.display_nmf2_components()
+        self.update_lasso2_tab()
+        self.log("Toutes les composantes NMF2 restaurées.")
+
+
+    def _save_nmf2_history(self):
+        state = (
+            [c.copy() for c in self.second_nmf_components],
+            [img.copy() for img in self.second_nmf_images],
+            list(self.second_nmf_labels)
+        )
+        current_idx = getattr(self, "_nmf2_history_index", None)
+        if current_idx is not None and current_idx < len(self.second_nmf_history) - 1:
+            self.second_nmf_history = self.second_nmf_history[:current_idx+1]
+        self.second_nmf_history.append(state)
+        self._nmf2_history_index = len(self.second_nmf_history) - 1
 
     def ask_and_refine(self):
         if not self.selected_indices_nmf2:
@@ -1351,6 +1516,7 @@ class MainApp(tk.Tk):
         else:
             self.H2_initial = None
 
+        self._save_nmf2_history()
         self.display_nmf2_components()
         self.update_lasso2_tab()
 
@@ -1533,8 +1699,8 @@ class MainApp(tk.Tk):
 
                 self.H2_initial = self.reconstructed_X.copy()
                 self.error_spectrum2 = None
-
                 self.after(0, self.display_nmf2_components)
+
             except Exception as e:
                 self.after(0, lambda: self.log(f"Erreur 2ᵉ NMF : {e}"))
             finally:
@@ -1751,19 +1917,22 @@ class MainApp(tk.Tk):
         component_colors_opt = None
         dynamic_window_ref = None
 
-        opt_dir = Path(self.loaded_dir) / "Optimized_Lasso"
-        coeffs_opt, recon_opt, errors_opt, rms_opt = optimize_lasso(
-            X2,
-            H_selected,
-            sample_names,
-            all_common_q,
-            str(opt_dir),
-            suffix="2ndNMF_lasso_optimized",
-            component_ids=component_ids_opt,
-            component_colors=component_colors_opt,
-            parent=self.lasso2_results_frame,
-            dynamic_window=dynamic_window_ref
-        )
+        if self.show_lasso2_optimized : 
+            opt_dir = Path(self.loaded_dir) / "Optimized_Lasso"
+            coeffs_opt, recon_opt, errors_opt, rms_opt = optimize_lasso(
+                X2,
+                H_selected,
+                sample_names,
+                all_common_q,
+                str(opt_dir),
+                suffix="2ndNMF_lasso_optimized",
+                component_ids=component_ids_opt,
+                component_colors=component_colors_opt,
+                parent=self.lasso2_results_frame,
+                dynamic_window=dynamic_window_ref
+            )
+        else:
+            pass
 
         if errors_opt is not None:
             avg_opt = np.mean(errors_opt)
@@ -1799,6 +1968,56 @@ class MainApp(tk.Tk):
         moyenne_errors_opt = np.mean(errors_opt) if errors_opt is not None else 0.0
         self.optimized_lasso_error_var.set(f"{moyenne_errors_opt:.4e}")
 
+        X = self.X.copy() 
+        all_common_q = self.all_common_q
+        sample_names = self.sample_names
+        H_all = np.array(self.second_nmf_components)
+        H = H_all.copy()  
+
+        X_reconstructed = []
+        for i in range(len(sample_names)):
+            coefs, _ = nnls(H.T, X[i])
+            recon = H.T @ coefs
+            X_reconstructed.append(recon)
+        X_reconstructed = np.array(X_reconstructed)
+
+        reconstruction_optimized_explicit = np.array(self.reconstruction_finale)  
+
+        i = 0
+        q_raw = self.q_raw_data[i]
+        I_raw = self.intensite_data[i]
+
+        f_interp = interp1d(q_raw, I_raw, bounds_error=False, fill_value="extrapolate")
+        raw_data_interpolated = f_interp(all_common_q)
+
+        rec_data = X_reconstructed[i]
+        rec_data_optimized = reconstruction_optimized_explicit[i]
+
+        for i in range(len(self.sample_names)):
+            q_raw = self.raw_data_q[i]
+            I_raw = self.raw_data_all[i]
+            f_interp = interp1d(q_raw, I_raw, bounds_error=False, fill_value="extrapolate")
+            raw_data_interpolated = f_interp(self.all_common_q)
+            rec_data = X_reconstructed[i]
+            rec_data_optimized = reconstruction_optimized_explicit[i]
+
+            df_err_before = pd.DataFrame({
+                'q': self.all_common_q,
+                'raw data': raw_data_interpolated,
+                'reconstructed data': rec_data,
+                'error': rec_data - raw_data_interpolated
+            })
+
+            df_err_after = pd.DataFrame({
+                'q': self.all_common_q,
+                'raw data': raw_data_interpolated,
+                'reconstructed data (optimized)': rec_data_optimized,
+                'error (optimized)': rec_data_optimized - raw_data_interpolated
+            })
+
+            df_err_before.to_csv(os.path.join(self.loaded_dir, f"erreur_avant_optim_{self.sample_names[i]}.csv"), index=False)
+            df_err_after.to_csv(os.path.join(self.loaded_dir, f"erreur_apres_optim_{self.sample_names[i]}.csv"), index=False)
+
         self.lasso2_coeffs_optimized = coeffs_opt
         self.lasso2_reconstructed_optimized = recon_opt
         self.lasso2_errors_optimized = errors_opt
@@ -1832,23 +2051,30 @@ class MainApp(tk.Tk):
         self.log("RMS figé ajouté aux composantes de la 2ᵉ NMF.")
 
     def reset_second(self):
-        if self.H2_initial is None:
-            self.log("Aucun raffinement à annuler.")
+        if not self.second_nmf_history:
+            self.log("Aucun historique de raffinement trouvé.")
             return
 
-        self.reconstructed_X = self.H2_initial.copy()
+        max_step = len(self.second_nmf_history) - 1
+        step = simpledialog.askinteger(
+            "Annuler Raffinement",
+            f"À quelle étape du raffinement voulez-vous revenir ? (0 = initial, {max_step} = dernier raffinement)",
+            minvalue=0, maxvalue=max_step, initialvalue=max_step,
+            parent=self
+        )
+        if step is None:
+            self.log("[INFO] Annulation de l'opération d'annulation")
+            return
 
-        self.reconstruct_dict = {}
-        for idx, nm in enumerate(self.sample_names):
-            df_ = pd.DataFrame({
-                'q': self.all_common_q,
-                'I(q)': self.H2_initial[idx],
-                'Sig(q)': np.zeros_like(self.H2_initial[idx])
-            })
-            self.reconstruct_dict[nm] = df_
+        comps, imgs, labels = self.second_nmf_history[step]
+        self.second_nmf_components = [c.copy() for c in comps]
+        self.second_nmf_images = [img.copy() for img in imgs]
+        self.second_nmf_labels = list(labels)
+        self._nmf2_history_index = step
 
-        self.launch_nmf2()
-
+        self.display_nmf2_components()
+        self.update_lasso2_tab()
+        self.log(f"Revenu à l'étape de raffinement #{step}.")
 
 if __name__ == "__main__":
     app = MainApp()
